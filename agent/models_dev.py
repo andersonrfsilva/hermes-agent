@@ -263,6 +263,34 @@ def _validate_registry(data: Any) -> bool:
     return isinstance(data, dict) and len(data) > 0
 
 
+# Per-model fields Hermes never reads (``ModelInfo`` and every raw-registry caller skip them): ~5 MiB
+# of the ~20 MiB parsed registry. Kept out of the in-memory copy only; the disk cache stays the full
+# payload. Dropping them after a full parse frees objects but not RSS (CPython keeps the freed
+# arenas), so the disk load, which every process pays at startup, drops them while parsing.
+_UNUSED_MODEL_FIELDS = ("description", "canonical_model_id", "last_updated", "reasoning_options", "experimental")
+
+
+def _object_without_unused_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json`` object hook: a model entry (an ``id`` without a ``models`` map, unlike a provider) skips
+    the unused fields; providers and nested objects are kept verbatim."""
+    obj = dict(pairs)
+    if "id" in obj and "models" not in obj:
+        for field in _UNUSED_MODEL_FIELDS:
+            obj.pop(field, None)
+    return obj
+
+
+def _slim_registry(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``_UNUSED_MODEL_FIELDS`` from every model entry of a fully parsed registry, in place."""
+    for provider in data.values():
+        models = provider.get("models") if isinstance(provider, dict) else None
+        for entry in (models.values() if isinstance(models, dict) else ()):
+            if isinstance(entry, dict):
+                for field in _UNUSED_MODEL_FIELDS:
+                    entry.pop(field, None)
+    return data
+
+
 def _load_disk_cache() -> dict[str, Any]:
     """Load the disk cache; a corrupt/empty one is quarantined with a warning so it never
     masquerades as ``{}`` and breaks provider/model resolution."""
@@ -270,7 +298,7 @@ def _load_disk_cache() -> dict[str, Any]:
         cache_path = _get_cache_path()
         if cache_path.exists():
             with open(cache_path, encoding="utf-8-sig") as f:
-                data = json.load(f)
+                data = json.load(f, object_pairs_hook=_object_without_unused_fields)
             if _validate_registry(data):
                 return data
             logger.warning("models.dev disk cache is corrupt or empty; quarantining (will refetch from network)")
@@ -354,7 +382,7 @@ def _commit_registry(data: dict[str, Any], *, etag: str = "", where: str) -> Non
     so a failing refresh on one path can never stomp state a succeeding refresh just committed."""
     global _models_dev_cache, _models_dev_cache_time, _models_dev_retry_after
     _save_disk_cache(data, etag)
-    _models_dev_cache = data
+    _models_dev_cache = _slim_registry(data)
     _models_dev_cache_time = time.time()
     _models_dev_retry_after = 0
     logger.debug(

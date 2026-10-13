@@ -1420,3 +1420,35 @@ class TestOpencodeRelayVisionMarker:
         with patch("agent.models_dev.fetch_models_dev", return_value=registry):
             caps = get_model_capabilities("opencode-go", "deepseek-v4-flash-vision-exp")
         assert caps.supports_vision is False and caps.context_window == 500000
+
+
+class TestInMemoryRegistrySlimming:
+    """Unread per-model fields are dropped from the held registry, never from the disk cache."""
+
+    _ENTRY = {
+        "id": "m1", "name": "M1", "family": "m", "description": "long marketing copy",
+        "canonical_model_id": "vendor/m1", "last_updated": "2026-01-01", "experimental": True,
+        "reasoning_options": [{"effort": "high"}], "tool_call": True,
+        "cost": {"input": 1.0, "output": 2.0}, "limit": {"context": 1000, "output": 100},
+    }
+
+    def test_network_commit_keeps_disk_verbatim_and_model_info_intact(self, tmp_path):
+        import json
+
+        import agent.models_dev as md
+
+        cache = tmp_path / "models_dev_cache.json"
+        payload = {"acme": {"id": "acme", "description": "provider blurb", "models": {"m1": dict(self._ENTRY)}}}
+        with patch.object(md, "_get_cache_path", return_value=cache), \
+             patch.object(md, "_get_etag_path", return_value=tmp_path / "models_dev_cache.etag"), \
+             patch.object(md, "_models_dev_cache", {}), patch.object(md, "_models_dev_cache_time", 0), \
+             patch.object(md, "_models_dev_retry_after", 0):
+            md._commit_registry(json.loads(json.dumps(payload)), etag="e1", where="test")
+            held = md._models_dev_cache["acme"]["models"]["m1"]
+            info = md.get_model_info("acme", "m1")
+            reloaded = md._load_disk_cache()["acme"]
+
+        assert json.loads(cache.read_text(encoding="utf-8")) == payload
+        assert not set(md._UNUSED_MODEL_FIELDS) & (held.keys() | reloaded["models"]["m1"].keys())
+        assert reloaded["description"] == "provider blurb"  # provider objects are not model entries
+        assert (info.context_window, info.cost_input, info.cost_output, info.tool_call) == (1000, 1.0, 2.0, True)
