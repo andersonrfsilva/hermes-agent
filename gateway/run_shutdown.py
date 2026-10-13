@@ -730,8 +730,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         )
         self._update_runtime_status(self._serving_state())
 
-    async def _drain_control_watcher(self, interval: float = 1.0) -> None:
-        """Poll ``.drain_request.json`` at 1s: present -> enter drain, absent -> exit; a stale epoch = absent."""
+    async def _drain_control_watcher(self, interval: float = 5.0) -> None:
+        """Poll ``.drain_request.json`` every 5s (operator drain; each poll is a thread hop): present -> drain, absent -> exit."""
         from gateway.drain_control import drain_requested
         while self._running:
             try:

@@ -224,7 +224,7 @@ async def gateway_drain(request: Request):
     return {
         "ok": True, "action": "drain", "requested_at": payload["requested_at"],
         # Echo so a caller polling /api/status knows the marker is now set;
-        # the gateway watcher flips gateway_state -> draining within ~1s.
+        # the gateway watcher flips gateway_state -> draining within ~5s.
         "draining": drain_requested(), "suppress_notification": payload["suppress_notification"],
     }
 
