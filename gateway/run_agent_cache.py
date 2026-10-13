@@ -1023,6 +1023,7 @@ class GatewayAgentCacheMixin:
             "Agent cache pressure: anon RSS %dMB over budget %dMB — evicting %d LRU session(s): %s",
             rss_mb, bounds.memory_high_mb, evicted_count, ", ".join(key for key, _ in plan),
         )
+        ordered = _ = None  # no frame reference may pin an evicted agent through the batch's trim
         self._spawn_batch_release(plan, reason="agent_cache_pressure", name="agent-cache-pressure")
         # The batch release drains `plan` in place (so the trim runs with no lingering agent refs) —
         # len(plan) is 0 once the daemon thread finishes, hence the pre-captured count.

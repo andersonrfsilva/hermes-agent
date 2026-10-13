@@ -1302,7 +1302,7 @@ DEFAULT_CONFIG = {
         # Return freed glibc pages at agent/TUI cleanup boundaries (no-op elsewhere).
         "memory_trim": {
             "enabled": True,
-            "cooldown_seconds": 60.0,
+            "cooldown_seconds": 3600.0,  # Non-forced trims (~1s gc+trim each); close + idle/pressure evictions force theirs.
             "log_every_n": 1,  # INFO-log every Nth periodic trim; force paths always log.
             # Suppress INFO logs when the readable RSS delta is smaller; 0 = log all.
             "info_log_min_delta_mb": 0.0,

@@ -20,7 +20,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_COOLDOWN_SECONDS = 60.0
+_DEFAULT_COOLDOWN_SECONDS = 3600.0  # mirrors context.memory_trim.cooldown_seconds in config_defaults
 _DEFAULT_LOG_EVERY_N = 1
 _DEFAULT_INFO_LOG_MIN_DELTA_MB = 0.0
 # Even forced trims honor a short floor: AIAgent.close() forces a trim, and delegate
