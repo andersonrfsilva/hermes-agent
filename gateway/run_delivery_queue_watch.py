@@ -31,26 +31,30 @@ class DeliveryQueueWatch:
     def __init__(self, homes: Callable[[], Iterable[Optional[Path]]], drain: Callable[[], None]) -> None:
         self._homes = homes
         self.drain = drain
-        self._served: list = list(homes())
+        self._paths: tuple[str, ...] = ()
+        self.refresh_homes()
         self._seen = self._stamp()
 
     def refresh_homes(self) -> None:
-        """Re-resolve the served profiles once per tick (a directory read under multiplex),
-        not on every poll; a profile that appears mid-interval is drained by the tick itself."""
-        self._served = list(self._homes())
-
-    def _stamp(self) -> tuple:
+        """Re-resolve the served profiles and their queue files once per tick (a directory read under
+        multiplex, a home lookup and a realpath per home), so each poll is only the two stats; a profile
+        that appears mid-interval is drained by the tick itself."""
         from cron.delivery_queue import queue_path
 
-        stamps = []
-        for home in self._served:
+        paths = []
+        for home in self._homes():
             path = queue_path(home)
-            for candidate in (path, path.with_name(path.name + "-wal")):
-                try:
-                    info = os.stat(candidate)
-                except OSError:
-                    continue
-                stamps.append((str(candidate), info.st_mtime_ns, info.st_size))
+            paths += [str(path), str(path.with_name(path.name + "-wal"))]
+        self._paths = tuple(paths)
+
+    def _stamp(self) -> tuple:
+        stamps = []
+        for candidate in self._paths:
+            try:
+                info = os.stat(candidate)
+            except OSError:
+                continue
+            stamps.append((candidate, info.st_mtime_ns, info.st_size))
         return tuple(stamps)
 
     def changed(self) -> bool:
