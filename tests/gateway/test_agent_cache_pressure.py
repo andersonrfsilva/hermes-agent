@@ -405,6 +405,47 @@ class TestConfiguredBoundsReachTheCache:
         assert runner._sweep_idle_cached_agents() == 1
         assert "s-stale" not in runner._agent_cache
 
+    @pytest.mark.parametrize("threaded", [True, False])
+    def test_idle_eviction_trims_the_heap_once_the_agents_are_unreachable(self, monkeypatch, threaded):
+        """The periodic trim may be hours away; an idle eviction returns the agents' heap itself. The
+        inline path (no thread can start) trims inside the sweep's own frame, so it also proves the
+        sweep keeps no reference to an evicted agent."""
+        import gc
+        import time as _t
+        import weakref
+
+        class Agent:
+            _last_activity_ts = _t.time() - 5.0
+
+        released, trims = [], []
+        runner = self._runner(AgentCacheBounds(idle_ttl_secs=0.01))
+        runner._agent_cache = OrderedDict()
+        runner._agent_cache_lock = threading.Lock()
+        runner._running_agents = {}
+        runner.session_store = None
+        runner._commit_then_release_soft = lambda agent, key: released.append(key)
+        agents = [Agent(), Agent()]
+        refs = [weakref.ref(a) for a in agents]
+        runner._agent_cache["s-a"] = (agents[0], "sig")
+        runner._agent_cache["s-b"] = (agents[1], "sig")
+        del agents
+
+        def trim_memory(*, force=False, reason=""):
+            gc.collect()
+            trims.append((force, reason, [r() is None for r in refs]))
+            return True
+
+        monkeypatch.setattr("hermes_cli.mem_trim.trim_memory", trim_memory)
+        if not threaded:
+            def no_thread(*args, **kwargs):
+                raise RuntimeError("can't start new thread")
+            monkeypatch.setattr("gateway.run_agent_cache.threading.Thread", no_thread)
+        assert runner._sweep_idle_cached_agents() == 2
+        _wait_for(lambda: trims)
+
+        assert released == ["s-a", "s-b"]
+        assert trims == [(True, "agent_cache_idle", [True, True])]  # one trim per sweep, after the last release
+
 def _wait_for(predicate, timeout: float = 3.0) -> None:
     """Wait for a background release thread to finish its work."""
     import time as _t

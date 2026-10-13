@@ -1023,31 +1023,39 @@ class GatewayAgentCacheMixin:
             "Agent cache pressure: anon RSS %dMB over budget %dMB — evicting %d LRU session(s): %s",
             rss_mb, bounds.memory_high_mb, evicted_count, ", ".join(key for key, _ in plan),
         )
-        try:
-            threading.Thread(target=self._release_pressure_batch, args=(plan,), daemon=True,
-                             name="agent-cache-pressure").start()
-        except Exception:
-            # Thread spawn failed (interpreter shutdown): release inline, unguarded (as on main).
-            self._release_pressure_batch(plan)
-        # _release_pressure_batch drains `plan` in place (so the trim runs with no lingering agent
-        # refs) — len(plan) is 0 once the daemon thread finishes, hence the pre-captured count.
+        self._spawn_batch_release(plan, reason="agent_cache_pressure", name="agent-cache-pressure")
+        # The batch release drains `plan` in place (so the trim runs with no lingering agent refs) —
+        # len(plan) is 0 once the daemon thread finishes, hence the pre-captured count.
         return evicted_count
 
-    def _release_pressure_batch(self, plan: list[tuple]) -> None:
-        """Release a pressure-evicted batch sequentially on one daemon thread, then ``malloc_trim`` so
-        RSS actually falls. The plan is drained (``pop`` + ``del``), not iterated, so no local
-        reference pins evicted agents during ``gc.collect`` + trim (else the valve over-evicts)."""
+    def _spawn_batch_release(self, plan: list[tuple], *, reason: str, name: str) -> None:
+        """Release *plan* on one daemon thread in the caller's context (inline when no thread can start:
+        interpreter shutdown). Each release enters its owner's profile scope; the trim that follows is
+        process-wide, so like the housekeeping trim it follows the caller's (launch) profile config."""
+        import contextvars
+        ctx = contextvars.copy_context()
+        try:
+            threading.Thread(target=ctx.run, args=(self._release_batch_then_trim, plan, reason),
+                             daemon=True, name=name).start()
+        except RuntimeError:
+            ctx.run(self._release_batch_then_trim, plan, reason)
+
+    def _release_batch_then_trim(self, plan: list[tuple], reason: str) -> None:
+        """Release evicted agents sequentially, then ``malloc_trim`` so RSS actually falls (an evicted
+        agent frees ~10 MiB the periodic trim would only return on its next cooldown). The plan is
+        drained (``pop`` + ``del``), not iterated, so no local reference pins evicted agents during
+        ``gc.collect`` + trim (else the pressure valve over-evicts)."""
         while plan:
             key, agent = plan.pop(0)  # FIFO — evict LRU-first order preserved
             try:
-                # Pressure sweeps run from the unscoped housekeeping watcher: enter each owner's scope.
+                # Sweeps run from the unscoped housekeeping watcher: enter each owner's scope.
                 self._run_release_in_profile_scope(self._commit_then_release_soft, (agent, key), key)
-            except Exception as _e:
-                logger.debug("Pressure release failed for %s: %s", key, _e)
+            except Exception:
+                logger.debug("Evicted-agent release failed for %s", key, exc_info=True)
             del agent
         with suppress(Exception):
             from hermes_cli.mem_trim import trim_memory
-            trim_memory(force=True, reason="agent_cache_pressure")
+            trim_memory(force=True, reason=reason)
 
     def _enforce_agent_cache_cap(self) -> None:
         """Evict oldest cached agents past the LRU cap (requires _agent_cache_lock); cleanup on a
@@ -1085,8 +1093,8 @@ class GatewayAgentCacheMixin:
                                            inline_fallback=False, session_key=key)
 
     def _sweep_idle_cached_agents(self) -> int:
-        """Evict cached agents idle past the idle TTL (lock acquired internally; cleanup on daemon
-        threads; mid-turn agents SKIPPED); returns the number evicted."""
+        """Evict cached agents idle past the idle TTL (lock acquired internally; released on one
+        daemon thread, then a heap trim; mid-turn agents SKIPPED); returns the number evicted."""
         _cache = getattr(self, "_agent_cache", None)
         _lock = getattr(self, "_agent_cache_lock", None)
         if _cache is None or _lock is None:
@@ -1106,8 +1114,10 @@ class GatewayAgentCacheMixin:
                 to_evict.append((key, agent))
             for key, _ in to_evict:
                 _cache.pop(key, None)
+        evicted = len(to_evict)
         for key, agent in to_evict:
             logger.info("Agent cache idle-TTL evict: session=%s (idle=%.0fs)", key, now - getattr(agent, "_last_activity_ts", now))
-            self._spawn_release_thread(self._commit_then_release_soft, (agent, key), f"agent-cache-idle-{key[:24]}",
-                                       inline_fallback=False, session_key=key)
-        return len(to_evict)
+        agent = entry = _ = None  # no frame reference may pin an evicted agent through the batch's trim
+        if to_evict:
+            self._spawn_batch_release(to_evict, reason="agent_cache_idle", name="agent-cache-idle")
+        return evicted
