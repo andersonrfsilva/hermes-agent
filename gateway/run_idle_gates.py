@@ -9,6 +9,8 @@ read or a corrupt row is "cannot prove emptiness", never "idle".
 from __future__ import annotations
 
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -64,3 +66,65 @@ async def off_loop_gate(runner: object, probe: Callable[[], bool]) -> bool:
     if not callable(offload):
         return True
     return bool(await offload(probe))
+
+
+def handoff_store_path(profile_home: Optional[Path]) -> Path:
+    """The ``state.db`` a handoff poll of *profile_home* reads (None: the process's own store)."""
+    if profile_home is None:
+        from hermes_state import _default_db_path
+
+        return _default_db_path()
+    return Path(profile_home) / "state.db"
+
+
+def _store_signature(db_path: Path) -> Optional[tuple]:
+    """``(mtime_ns, size)`` of a SQLite store and its WAL; None when the main file is missing."""
+    signature = []
+    for candidate in (db_path, db_path.with_name(db_path.name + "-wal")):
+        try:
+            st = os.stat(candidate)
+        except OSError:
+            if candidate is db_path:
+                return None
+            signature.append(None)
+            continue
+        signature.append((st.st_mtime_ns, st.st_size))
+    return tuple(signature)
+
+
+class StoreChangeGate:
+    """Skip a poll while its SQLite store is untouched since a read PROVED it held nothing pending.
+
+    A new row can only appear through a write, which moves the main file's or the WAL's
+    ``(mtime_ns, size)``. ``check`` takes the signature BEFORE the poll and ``mark_empty`` records it
+    only after a raising probe answered "nothing pending", so a write racing the poll, a failed read
+    and a read that swallowed its error all keep polling. A store that cannot be stat'ed is always
+    polled, and a proven-empty store is still re-read every ``max_skip_s``."""
+
+    def __init__(self, max_skip_s: float = 60.0) -> None:
+        self._max_skip_s = max_skip_s
+        self._empty: dict[str, tuple[tuple, float]] = {}
+
+    def check(self, db_path: Path) -> tuple[bool, Optional[tuple]]:
+        """``(skip, signature)``: skip when the store is unchanged since it was proven empty."""
+        signature = _store_signature(db_path)
+        seen = self._empty.get(str(db_path))
+        fresh = seen is not None and time.monotonic() - seen[1] < self._max_skip_s
+        return signature is not None and fresh and seen[0] == signature, signature
+
+    def mark_empty(self, db_path: Path, signature: Optional[tuple]) -> None:
+        if signature is not None:
+            self._empty[str(db_path)] = (signature, time.monotonic())
+
+
+async def store_proven_empty(session_db: Any) -> bool:
+    """True only when the scoped store answers "no pending handoff" without error; a failing probe
+    or a stand-in without it is "unknown", never empty (``list_pending_handoffs`` swallows errors)."""
+    probe = getattr(session_db, "has_pending_handoffs", None)
+    if probe is None:
+        return False
+    try:
+        return not await probe()
+    except Exception:
+        logger.debug("pending-handoff probe failed; the store stays unproven", exc_info=True)
+        return False
