@@ -834,16 +834,50 @@ class GatewayStartupMixin:
         return service
 
     async def _ensure_hosted_room_worker(self):
+        # Set before the attempt: a failed or half-started worker stays supervised and gets stopped.
+        self._hosted_room_worker_started = True
         return await asyncio.to_thread(self._start_hosted_room_worker_sync)
 
+    @staticmethod
+    def _hosted_room_store_signature() -> tuple:
+        """``(mtime_ns, size)`` of the room store and its WAL: a room can only appear through a write there."""
+        from gateway.hosted_rooms import default_db_path
+        path = default_db_path()
+        signature = []
+        for candidate in (path, path.with_name(path.name + "-wal")):
+            try:
+                st = candidate.stat()
+                signature.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                signature.append(None)
+        return tuple(signature)
+
+    async def _hosted_room_worker_wanted(self) -> bool:
+        """The worker (and the ~28 MiB ``tui_gateway.server`` it imports) is needed only once a live room
+        exists; once started it stays up for the gateway lifetime. The store is re-probed only after it
+        changed on disk, and a "rooms present" verdict is never cached so a failed start keeps retrying."""
+        if getattr(self, "_hosted_room_worker_started", False):
+            return True
+        signature = self._hosted_room_store_signature()
+        if signature == getattr(self, "_hosted_room_store_signature_seen", None):
+            return False
+        from gateway.hosted_rooms import default_db_path, has_live_rooms
+        if await asyncio.to_thread(has_live_rooms, default_db_path()):
+            return True
+        self._hosted_room_store_signature_seen = signature
+        return False
+
     async def _hosted_room_worker_watcher(self, interval: float = 1.0) -> None:
-        """Keep the room worker alive for the messaging gateway lifetime."""
+        """Start the room worker when the first live room appears, then keep it alive."""
         while self._running:
-            await self._ensure_hosted_room_worker()
+            if await self._hosted_room_worker_wanted():
+                await self._ensure_hosted_room_worker()
             await asyncio.sleep(interval)
 
     async def _stop_hosted_room_worker(self, timeout: float = 5.0) -> bool:
         """Pause room execution durably without interrupting accepted turns."""
+        if not getattr(self, "_hosted_room_worker_started", False):
+            return True
         from tui_gateway import methods_groups
         return await asyncio.to_thread(methods_groups.stop_hosted_room_service, timeout=timeout)
 
@@ -1476,7 +1510,8 @@ class GatewayStartupMixin:
         """Room worker, heartbeat, gateway:startup hook, channel directory, /update notice."""
         from gateway.run import _hermes_home
         try:
-            await self._ensure_hosted_room_worker()
+            if await self._hosted_room_worker_wanted():
+                await self._ensure_hosted_room_worker()
         except Exception:
             logger.error(
                 "Group Chat worker failed to start; mutating Group Chat commands "

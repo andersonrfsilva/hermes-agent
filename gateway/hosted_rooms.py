@@ -910,6 +910,35 @@ def list_rooms(
     return [_room_from_row(row) for row in rows]
 
 
+def has_live_rooms(db_path: DbPath) -> bool:
+    """True when the store, or the pre-isolation ``state.db`` its first open has not imported yet,
+    holds a non-disbanded room. Never creates or migrates either file, so an install that never used
+    Group Chat stays untouched. An unreadable store answers True: callers then take the full worker
+    path, which owns recovery and the one-shot legacy import."""
+    from gateway.hosted_rooms_legacy_import import MARKER_TABLE, SOURCE_NAME, source_path
+
+    def live(store: Path) -> bool:
+        try:
+            return _probe(store, "hosted_rooms", _SELECT_ANY_LIVE_ROOM, (), "hosted rooms unavailable")
+        except RoomProbeUnavailableError:
+            return True
+
+    def imported(store: Path) -> bool:
+        try:
+            return _probe(store, MARKER_TABLE, f"SELECT 1 FROM {MARKER_TABLE} WHERE source=?",
+                          (SOURCE_NAME,), "legacy import marker unavailable")
+        except RoomProbeUnavailableError:
+            return False
+
+    path = Path(db_path)
+    legacy = source_path(path)
+    # The import copies rows and leaves the source intact, so once recorded the legacy file is history.
+    return live(path) or (legacy is not None and not imported(path) and live(legacy))
+
+
+_SELECT_ANY_LIVE_ROOM = "SELECT 1 FROM hosted_rooms WHERE disbanded_at IS NULL LIMIT 1"
+
+
 def rename_room(db_path: DbPath, *, room_id: Any, event_id: Any, name: Any, now: float | None = None) -> dict[str, Any]:
     """Rename a live room and append its replay event atomically."""
     room_id = _room_id(room_id)
