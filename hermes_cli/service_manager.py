@@ -445,6 +445,9 @@ class S6ServiceManager:
             "# shellcheck shell=sh",
             "set -e",
             "export HOME=/opt/data",
+            # An operator PATH override (compose ``environment: PATH=...``) replaces the image's, and with-contenv
+            # hands it to this script; put the image's hermes dirs back first or `hermes` is not found (exit 127 loop).
+            'export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:$PATH"',
             "cd /opt/data",
         ]
         for k, v in sorted(extra_env.items()):

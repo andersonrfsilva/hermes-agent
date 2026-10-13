@@ -293,3 +293,32 @@ def test_dashboard_supervised_when_env_set(
     )
 
 
+
+
+def test_gateway_run_survives_an_operator_path_override(
+    built_image: str, container_name: str,
+) -> None:
+    """A compose ``environment: PATH=...`` without the image's hermes dirs must not break boot.
+
+    with-contenv hands the operator's PATH to the CMD wrapper and to the supervised slot's run
+    script; both exec a bare ``hermes``, which then exited 127 ("unable to exec hermes") and the
+    container restart-looped. Both now put /opt/hermes/bin and the venv back on PATH first.
+    """
+    start_container(
+        built_image, container_name,
+        "PATH=/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        cmd="gateway run",
+    )
+    logs = wait_for_docker_logs(container_name, "s6 supervision", deadline_s=60.0)
+    assert "unable to exec hermes" not in logs
+
+    end = time.monotonic() + 60.0
+    while time.monotonic() < end:
+        r = docker_exec_sh(container_name, "pgrep -f 'python.*hermes.*gateway run' >/dev/null")
+        if r.returncode == 0:
+            break
+        time.sleep(0.5)
+    assert r.returncode == 0, (
+        "supervised gateway never started under the overridden PATH; "
+        f"s6 log:\n{docker_exec_sh(container_name, 'tail -n 20 /opt/data/logs/gateways/default/current').stdout}"
+    )

@@ -48,7 +48,8 @@ case "${HERMES_DASHBOARD_INSECURE:-}" in
         ;;
 esac
 
-# Skip the drop when already non-root.
+# An operator PATH override replaces the image's; put the hermes dirs back first. Skip the drop when non-root.
+export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:$PATH"
 [ "$(id -u)" = 0 ] || exec hermes dashboard --host "$dash_host" --port "$dash_port" --no-open
 exec s6-setuidgid hermes hermes dashboard \
     --host "$dash_host" --port "$dash_port" --no-open

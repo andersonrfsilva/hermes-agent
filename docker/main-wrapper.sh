@@ -28,6 +28,11 @@ if [ -z "${HERMES_MAIN_WRAPPER_ENV_READY:-}" ] && \
 fi
 unset HERMES_MAIN_WRAPPER_ENV_READY
 
+# with-contenv hands over the container env as given; an operator PATH override (compose
+# `environment: PATH=...`) drops the image's hermes dirs and `hermes` below exits 127 in a
+# restart loop. Put them back first, in the image's order (privilege-drop shim before the venv).
+export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:$PATH"
+
 drop() { [ "$(id -u)" = 0 ] && set -- s6-setuidgid hermes "$@"; exec "$@"; }
 
 # --- Reject the unsupported `docker run --user <uid>:<gid>` start ---
