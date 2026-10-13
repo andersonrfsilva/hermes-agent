@@ -1783,10 +1783,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
 
         context_token = _POLLING_GENERATION_CONTEXT.set(generation)
         try:
-            # asyncio.wait_for can wait forever on httpcore/AnyIO shielded scopes; use the wall-deadline
-            # helper and abandon the partial updater (caller rebuilds).
+            # wait_for can hang on httpcore/AnyIO shielded scopes: wall deadline, abandon the partial updater. Idle long-poll
+            # 30s (PTB: 10s, adds it to read_timeout): 3x fewer HTTPS round-trips, still well under the progress/stall bounds.
             await _await_with_thread_deadline(
-                app.updater.start_polling(
+                app.updater.start_polling(timeout=30,
                     allowed_updates=Update.ALL_TYPES, drop_pending_updates=drop_pending_updates, error_callback=_generation_error_callback),
                 timeout=_UPDATER_START_TIMEOUT,
                 on_abandon=((lambda app=app: _shutdown_abandoned_app(app)) if abandon_app_on_timeout else None))
